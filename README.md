@@ -6,4 +6,5 @@ Example: Temperature/SHT41 Temperature[°C]: 22.36
 
 Just run the python script uartLogPlot.py or the /dist/uartLogPlot.exe
 
-<img width="2549" height="1322" alt="image" src="https://github.com/user-attachments/assets/174a789d-9b04-4de2-9997-92ae5b8cf35d" />
+<img width="1398" height="671" alt="image" src="https://github.com/user-attachments/assets/d4a8b578-801c-41de-bbb2-7a805cff9634" />
+
