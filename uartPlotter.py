@@ -1,123 +1,166 @@
 import re
-import time
-from datetime import datetime
-import serial
-import matplotlib.pyplot as plt
-from collections import defaultdict
-from matplotlib.animation import FuncAnimation
 import threading
+import time
+from collections import defaultdict, deque
+from datetime import datetime
+
+import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
+import serial
+import math
+
+# === User prompt ===
+print("Welcome to UART Data Logger and Plotter")
+print("\nExpected Format: <group>/<signal>[unit]: <value>")
+print("Example: Temperature/SHT41 Temperature[°C]: 22.36")
+print("\nConfiguration:")
+port = input("Serieller Port (z.B. COM3 oder /dev/ttyUSB0) [COM5]: ").strip() or "COM5"
+baud = int(input("Baudrate (z.B. 115200) [9600]: ").strip() or "9600")
+logfile = input("Logfile Name (z.B. logfile.txt) [uart.log]: ").strip() or "uart.log"
+window_sec = float(input("Anzahl Sekunden im Plotfenster [60]: ").strip() or "60")
 
 
-class UARTPlotter:
-    LINE_RE = re.compile(
-        r"^\s*"
-        r"(?P<group>[A-Za-z0-9_ /\-]+)"  # Gruppe, erlaubt auch Leerzeichen und Bindestriche
-        r"/"
-        r"(?P<name>[A-Za-z0-9_ /\-]+)"  # Signalname, erlaubt auch Leerzeichen und Bindestriche
-        r"\["
-        r"(?P<unit>[^\]]+)"  # Einheit, alles außer schließende Klammer
-        r"\]\s*:\s*"
-        r"(?P<value>[-+0-9.eE]+)"  # Wert, erlaubt Zahlen mit Dezimalpunkten, Vorzeichen, expon.
-        r"\s*$"
-    )
+# === Data structures ===
+# {group: {unit: {signal_name: deque[(timestamp, value)]}}}
+data_dict = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: deque())))
+start_time = time.time()
+legend_positions = ['upper left', 'upper right', 'lower left', 'lower right', 'upper center', 'lower center']
 
-    def __init__(self, port, baudrate, logfile):
-        self.ser = serial.Serial(port, baudrate, timeout=1)
-        self.logfile = logfile
-        self.lock = threading.Lock()
-        self.data = {}
 
-    def parse_line(self, line: str):
-        m = self.LINE_RE.match(line)
-        if not m:
-            return None, None, None, None
-        try:
-            value = float(m.group("value"))
-        except ValueError:
-            return None, None, None, None
-        return m.group("group"), m.group("name"), m.group("unit"), value
+def parse_line(line):
+    """
+    Parsere die Zeile nach dem Format: <group>/<signal>[<unit>]: <value>
+    """
+    match = re.match(r"([^/]+)/([^\[]+)\[([^\]]+)\]:\s*(-?\d+(\.\d+)?(?:[eE][-+]?\d+)?)", line.strip())
+    if not match:
+        return None  # Zeile passt nicht
+    group, signal, unit, value = match.group(1), match.group(2).strip(), match.group(3), float(match.group(4))
+    return group, signal, unit, value
 
-    def log(self, msg):
-        timestamp = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())
-        with open(self.logfile, 'a') as f:
-            f.write(f'{timestamp}: {msg}\n')
 
-    def read_uart(self):
+def uart_reader():
+    """
+    Liest kontinuierlich Daten von der seriellen Schnittstelle und schreibt sie ins Logfile
+    """
+    try:
+        ser = serial.Serial(port, baud, timeout=1)
+    except Exception as e:
+        print(f"Fehler beim Öffnen des Ports {port}: {e}")
+        return
+
+    with open(logfile, 'a', encoding='utf-8') as log:
+        print(f"Starte Datenerfassung auf {port} @ {baud} baud")
         while True:
-            line = self.ser.readline().decode('utf-8').strip()
-            if line:
-                self.log(line)
-                group, name, unit, value = self.parse_line(line)
-                now = time.time()
-                # print(f"group: {group}, name: {name}, unit: {unit}, value: {value}")
-                if group is None:
+            try:
+                rawline = ser.readline()
+                if not rawline:
                     continue
-                with self.lock:
-                    if group not in self.data:
-                        self.data[group] = {}
-                    if unit not in self.data[group]:
-                        self.data[group][unit] = {}
-                    if name not in self.data[group][unit]:
-                        self.data[group][unit][name] = []
-                    self.data[group][unit][name].append((now, value))
+                try:
+                    line = rawline.decode("utf-8").strip()
+                except UnicodeDecodeError:
+                    continue  # Ignorieren ungültiger UTF-8-Zeilen
 
-    def plot_data_thread(self, interval=0.1):
-        plt.ion()  # Interaktiver Modus für dynamische Updates
-        fig, axs = None, None
+                if not line:
+                    continue
 
-        while True:
-            with self.lock:
-                data_copy = self.data.copy()  # flache Kopie reicht für Key-Access
-
-            if not data_copy:
-                time.sleep(interval)
+                ts = time.time() - start_time
+                parsed = parse_line(line)
+                if parsed:
+                    group, signal, unit, value = parsed
+                    dq = data_dict[group][unit][signal]
+                    dq.append((ts, value))
+                    # Logging mit Zeitstempel
+                    log.write(f"{datetime.now().isoformat()}: {line}\n")
+                    log.flush()
+            except Exception as e:
+                print(f"Fehler beim Lesen: {e}")
                 continue
 
-            # Subplots anlegen oder aktualisieren
-            if fig is None:
-                fig, axs = plt.subplots(len(data_copy), 1, figsize=(10, 6 * len(data_copy)))
-                if len(data_copy) == 1:
-                    axs = [axs]
-            else:
-                fig.clf()
-                axs = []
-                for i in range(len(data_copy)):
-                    axs.append(fig.add_subplot(len(data_copy), 1, i + 1))
 
-            for i, (group, units) in enumerate(data_copy.items()):
-                ax = axs[i]
-                ax.set_title(f"Group: {group}")
-                ax.set_xlabel("Time [s]")
-                ax.set_ylabel("Values")
+def dynamic_plot():
+    """
+    Plottet die Daten dynamisch mit separaten Y-Achsen pro Unit
+    """
+    plt.ion()
+    fig = plt.figure(figsize=(14, 6))
+    color_cycle = plt.rcParams['axes.prop_cycle'].by_key()['color']
 
-                color_cycle = plt.rcParams['axes.prop_cycle'].by_key()['color']
-                base_ax = ax
+    while True:
+        groups = sorted(data_dict.keys())
+        n_groups = len(groups)
+        fig.clf()
 
-                for c, (unit, sensors) in enumerate(units.items()):
-                    if c > 0:
-                        ax2 = base_ax.twinx()
-                        ax2.spines['right'].set_position(('outward', 60 * (c - 1)))
-                    else:
-                        ax2 = base_ax
+        for idx, group in enumerate(groups, start=1):
+            # Erstelle primäre Achse
+            ax_primary = plt.subplot(math.ceil(n_groups/2), 2 if n_groups > 1 else 1 , idx)
+            units = sorted(data_dict[group].keys())
 
-                    ax2.set_ylabel(f"Unit: {unit}")
-                    for sensor, values in sensors.items():
-                        times, vals = zip(*values)
-                        ax2.plot(times, vals, label=f"{sensor}", color=color_cycle[c % len(color_cycle)])
+            # Speichere alle Achsen pro Unit
+            axes_dict = {units[0]: ax_primary}  # Erste Unit auf primärer Achse
 
-                base_ax.legend(loc='upper left')
+            # Erstelle zusätzliche Achsen für weitere Units
+            for unit_idx, unit in enumerate(units[1:], start=1):
+                # Neue Y-Achse auf der rechten Seite
+                ax_new = ax_primary.twinx()
+                # Verschiebe die Achse nach rechts (bei mehreren Achsen)
+                if unit_idx == 1:
+                    offset = 0
+                else:
+                    offset = 60 * (unit_idx-1)
+                ax_new.spines['right'].set_position(('outward', offset))
+                axes_dict[unit] = ax_new
 
-            plt.tight_layout()
-            plt.pause(0.1)
-            time.sleep(interval)
+            color_idx = 0
+            # Sammle alle Y-Werte pro Unit für Min/Max Berechnung
+            unit_values = {unit: [] for unit in units}
 
-    def run(self):
-        reader_thread = threading.Thread(target=self.read_uart, daemon=True)
-        reader_thread.start()
-        self.plot_data_thread()
-        # self.plot()
+            for unit_idx, unit in enumerate(units):
+                ax = axes_dict[unit]
+                for signal, dq in data_dict[group][unit].items():
+                    # Werte für Plotfenster filtern
+                    xs, ys = zip(*[(t, v) for t, v in dq if t > time.time() - start_time - window_sec]) if dq else (
+                        [], [])
+                    if xs:
+                        ax.plot(xs, ys, label=f"{signal}", color=color_cycle[color_idx % len(color_cycle)])
+                        unit_values[unit].extend(ys)
+                        color_idx += 1
+
+                # Berechne Y-Limits für diese Unit
+                if unit_values[unit]:
+                    y_min = min(unit_values[unit])
+                    y_max = max(unit_values[unit])
+                    y_range = y_max - y_min if y_max != y_min else 1
+                    y_min -= 0.1 * y_range
+                    y_max += 0.1 * y_range
+                    ax.set_ylim([y_min, y_max])
+
+                ax.set_ylabel(unit, rotation=270, labelpad=10)
+                pos = legend_positions[unit_idx % len(legend_positions)]
+                ax.legend(loc=pos, fontsize=9)
+
+            # X-Achse und Titel nur auf primärer Achse
+            ax_primary.set_xlabel("Zeit [s]")
+            ax_primary.set_title(group)
+            ax_primary.set_xlim([max(0, time.time() - start_time - window_sec), time.time() - start_time])
+
+        plt.tight_layout()
+        plt.pause(0.1)
+
+        # Entferne alte Werte aus dem Fenster
+        tmin = time.time() - start_time - window_sec
+        for group in data_dict:
+            for unit in data_dict[group]:
+                for signal in data_dict[group][unit]:
+                    dq = data_dict[group][unit][signal]
+                    while dq and dq[0][0] < tmin:
+                        dq.popleft()
 
 
-# Beispiel zur Verwendung:
-plotter = UARTPlotter('COM5', 9600, 'uart_log.txt')
-plotter.run()
+if __name__ == "__main__":
+    # Starte den Serial-Reader-Thread
+    t = threading.Thread(target=uart_reader, daemon=True)
+    t.start()
+    try:
+        dynamic_plot()
+    except KeyboardInterrupt:
+        print("\nBeendet.")
