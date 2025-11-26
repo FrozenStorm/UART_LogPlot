@@ -1,169 +1,123 @@
 import re
-import csv
 import time
 from datetime import datetime
-
 import serial
 import matplotlib.pyplot as plt
+from collections import defaultdict
 from matplotlib.animation import FuncAnimation
-
-SERIAL_PORT = "COM5"       # z.B. "/dev/ttyUSB0"
-BAUDRATE = 9600
-LOGFILE = f"uart_log_{datetime.now().strftime('%Y%m%d')}.csv"
-
-LINE_RE = re.compile(r"^\s*(?P<name>[A-Za-z0-9_]+)\[(?P<unit>[^\]]+)\]\s*:\s*(?P<value>[-+0-9.]+)\s*$")
-MAX_POINTS = 500
-
-# Linienstile (können nach Wunsch erweitert werden)
-LINE_STYLES = ['-', '--', '-.', ':']
-
-def parse_line(line: str):
-    m = LINE_RE.match(line)
-    if not m:
-        return None
-    try:
-        value = float(m.group("value"))
-    except ValueError:
-        return None
-    return m.group("name"), m.group("unit"), value
+import threading
 
 
-def main():
-    ser = serial.Serial(SERIAL_PORT, BAUDRATE, timeout=1)
-    time.sleep(2.0)
-    ser.reset_input_buffer()
+class UARTPlotter:
+    LINE_RE = re.compile(
+        r"^\s*"
+        r"(?P<group>[A-Za-z0-9_ /\-]+)"  # Gruppe, erlaubt auch Leerzeichen und Bindestriche
+        r"/"
+        r"(?P<name>[A-Za-z0-9_ /\-]+)"  # Signalname, erlaubt auch Leerzeichen und Bindestriche
+        r"\["
+        r"(?P<unit>[^\]]+)"  # Einheit, alles außer schließende Klammer
+        r"\]\s*:\s*"
+        r"(?P<value>[-+0-9.eE]+)"  # Wert, erlaubt Zahlen mit Dezimalpunkten, Vorzeichen, expon.
+        r"\s*$"
+    )
 
-    logfile = open(LOGFILE, "w", newline="", encoding="utf-8")
-    csv_writer = csv.writer(logfile)
-    csv_writer.writerow(["timestamp_iso", "signal_name", "unit", "value"])
+    def __init__(self, port, baudrate, logfile):
+        self.ser = serial.Serial(port, baudrate, timeout=1)
+        self.logfile = logfile
+        self.lock = threading.Lock()
+        self.data = {}
 
-    # Datenspeicher: Signalname -> Zeiten, Werte, Einheit, Plot-Linie
-    data = {}
+    def parse_line(self, line: str):
+        m = self.LINE_RE.match(line)
+        if not m:
+            return None, None, None, None
+        try:
+            value = float(m.group("value"))
+        except ValueError:
+            return None, None, None, None
+        return m.group("group"), m.group("name"), m.group("unit"), value
 
-    # Dictionary Einheit -> Achse
-    unit_axes = {}
+    def log(self, msg):
+        timestamp = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())
+        with open(self.logfile, 'a') as f:
+            f.write(f'{timestamp}: {msg}\n')
 
-    plt.style.use("ggplot")
-    fig, ax_primary = plt.subplots()
-    ax_primary.set_xlabel("Zeit (s)")
-    ax_primary.grid(True)
-    ax_primary.set_title("UART Signale mit je einer Achse pro Einheit")
+    def read_uart(self):
+        while True:
+            line = self.ser.readline().decode('utf-8').strip()
+            if line:
+                self.log(line)
+                group, name, unit, value = self.parse_line(line)
+                now = time.time()
+                # print(f"group: {group}, name: {name}, unit: {unit}, value: {value}")
+                if group is None:
+                    continue
+                with self.lock:
+                    if group not in self.data:
+                        self.data[group] = {}
+                    if unit not in self.data[group]:
+                        self.data[group][unit] = {}
+                    if name not in self.data[group][unit]:
+                        self.data[group][unit][name] = []
+                    self.data[group][unit][name].append((now, value))
 
-    ax_primary.set_ylabel("(Primärachse)")
-    unit_axes_list = []  # für Achsenfarbenzuordnung und Offset
+    def plot_data_thread(self, interval=0.1):
+        plt.ion()  # Interaktiver Modus für dynamische Updates
+        fig, axs = None, None
 
-    def get_axis_for_unit(unit):
-        # Wie bisher + jetzt auch Linienstil zuweisen
-        if unit in unit_axes:
-            return unit_axes[unit]
+        while True:
+            with self.lock:
+                data_copy = self.data.copy()  # flache Kopie reicht für Key-Access
 
-        if not unit_axes:
-            ax_primary.set_ylabel(f"{unit} [{LINE_STYLES[0]}]")
-            unit_axes[unit] = {"axis": ax_primary, "linestyle": LINE_STYLES[0]}
-            unit_axes_list.append(ax_primary)
-            return unit_axes[unit]
-        else:
-            ax_new = ax_primary.twinx()
-            offset = 0.1 * (len(unit_axes) - 1)
-            ax_new.spines["right"].set_position(("axes", 1 + offset))
-            ax_new.set_frame_on(True)
-            ax_new.patch.set_visible(False)
-            color = "black"
-            ax_new.yaxis.label.set_color(color)
-            ax_new.tick_params(axis='y', colors=color)
-            linestyle = LINE_STYLES[len(unit_axes) % len(LINE_STYLES)]
-            unit_axes[unit] = {"axis": ax_new, "linestyle": linestyle}
-            ax_new.set_ylabel(f"{unit} [{linestyle}]")
-            unit_axes_list.append(ax_new)
-            return unit_axes[unit]
-
-    def update_plot(frame):
-        for _ in range(20):
-            if ser.in_waiting == 0:
-                break
-
-            raw = ser.readline()
-            try:
-                text = raw.decode("utf-8", errors="replace").strip()
-            except Exception:
+            if not data_copy:
+                time.sleep(interval)
                 continue
 
-            if not text:
-                continue
+            # Subplots anlegen oder aktualisieren
+            if fig is None:
+                fig, axs = plt.subplots(len(data_copy), 1, figsize=(10, 6 * len(data_copy)))
+                if len(data_copy) == 1:
+                    axs = [axs]
+            else:
+                fig.clf()
+                axs = []
+                for i in range(len(data_copy)):
+                    axs.append(fig.add_subplot(len(data_copy), 1, i + 1))
 
-            parsed = parse_line(text)
-            if not parsed:
-                print("Ungültige Zeile:", text)
-                continue
+            for i, (group, units) in enumerate(data_copy.items()):
+                ax = axs[i]
+                ax.set_title(f"Group: {group}")
+                ax.set_xlabel("Time [s]")
+                ax.set_ylabel("Values")
 
-            name, unit, value = parsed
-            now = datetime.now()
-            iso_ts = now.isoformat(timespec="milliseconds")
-
-            csv_writer.writerow([iso_ts, name, unit, value])
-            logfile.flush()
-
-            if name not in data:
-                # Neues Signal anlegen
-                data[name] = {"times": [], "values": [], "unit": unit, "line": None}
-
-            times = data[name]["times"]
-            values = data[name]["values"]
-
-            t_rel = 0.0 if not times else now.timestamp() - times[0]
-            times.append(now.timestamp())
-            values.append(value)
-
-            if len(times) > MAX_POINTS:
-                times.pop(0)
-                values.pop(0)
-
-        if not data:
-            return []
-
-        # Linien pro Signal anlegen, falls noch nicht geschehen
-        for name, entry in data.items():
-            if entry["line"] is None:
-                ax_info = get_axis_for_unit(entry["unit"])
-                ax = ax_info["axis"]
-                linestyle = ax_info["linestyle"]
-                color_idx = len(ax.lines) % 10
                 color_cycle = plt.rcParams['axes.prop_cycle'].by_key()['color']
-                color = color_cycle[color_idx]
-                entry["line"], = ax.plot([], [], label=name, color=color, linestyle=linestyle)
+                base_ax = ax
 
-        # Achsen skalieren
-        for ax_info in unit_axes.values():
-            ax_info["axis"].relim()
-            ax_info["axis"].autoscale_view()
+                for c, (unit, sensors) in enumerate(units.items()):
+                    if c > 0:
+                        ax2 = base_ax.twinx()
+                        ax2.spines['right'].set_position(('outward', 60 * (c - 1)))
+                    else:
+                        ax2 = base_ax
 
-        # Daten setzen
-        for entry in data.values():
-            ax = get_axis_for_unit(entry["unit"])["axis"]
-            t0 = entry["times"][0] if entry["times"] else 0
-            xdata = [t - t0 for t in entry["times"]]
-            entry["line"].set_data(xdata, entry["values"])
+                    ax2.set_ylabel(f"Unit: {unit}")
+                    for sensor, values in sensors.items():
+                        times, vals = zip(*values)
+                        ax2.plot(times, vals, label=f"{sensor}", color=color_cycle[c % len(color_cycle)])
 
-        # Alle Linien sammeln für Legende
-        all_lines = [entry["line"] for entry in data.values()]
-        all_labels = [entry["line"].get_label() for entry in data.values()]
-        ax_primary.legend(all_lines, all_labels, loc="upper left")
+                base_ax.legend(loc='upper left')
 
-        return all_lines
+            plt.tight_layout()
+            plt.pause(0.1)
+            time.sleep(interval)
 
-    ani = FuncAnimation(fig, update_plot, interval=100, blit=True)
-
-    print(f"Logging nach: {LOGFILE}")
-    print("Fenster schließen oder Strg+C zum Beenden.")
-
-    try:
-        plt.show()
-    except KeyboardInterrupt:
-        pass
-    finally:
-        logfile.close()
-        ser.close()
+    def run(self):
+        reader_thread = threading.Thread(target=self.read_uart, daemon=True)
+        reader_thread.start()
+        self.plot_data_thread()
+        # self.plot()
 
 
-if __name__ == "__main__":
-    main()
+# Beispiel zur Verwendung:
+plotter = UARTPlotter('COM5', 9600, 'uart_log.txt')
+plotter.run()
