@@ -83,6 +83,7 @@ def dynamic_plot():
     """
     plt.ion()
     fig = plt.figure(figsize=(14, 6))
+    fig.canvas.manager.set_window_title("UART Data Logger and Plotter")
     color_cycle = plt.rcParams['axes.prop_cycle'].by_key()['color']
 
     while True:
