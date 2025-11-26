@@ -26,6 +26,9 @@ class UARTPlotter:
         self.logfile = logfile
         self.lock = threading.Lock()
         self.data = {}
+        plt.ion()  # Interaktiver Modus für dynamische Updates
+        self.fig, self.axs = plt.subplots()
+        self.ax = {}
 
     def parse_line(self, line: str):
         m = self.LINE_RE.match(line)
@@ -42,7 +45,7 @@ class UARTPlotter:
         with open(self.logfile, 'a') as f:
             f.write(f'{timestamp}: {msg}\n')
 
-    def read_uart(self):
+    def read_log_plot_uart(self):
         while True:
             line = self.ser.readline().decode('utf-8').strip()
             if line:
@@ -53,69 +56,40 @@ class UARTPlotter:
                 if group is None:
                     continue
                 with self.lock:
-                    if group not in self.data:
-                        self.data[group] = {}
-                    if unit not in self.data[group]:
-                        self.data[group][unit] = {}
-                    if name not in self.data[group][unit]:
-                        self.data[group][unit][name] = []
-                    self.data[group][unit][name].append((now, value))
+                    if group+unit not in self.data:
+                        self.data[group+unit] = {}
+                        self.ax[group+unit] = {}
+                    if name not in self.data[group+unit]:
+                        self.data[group+unit][name] = []
+                    self.data[group+unit][name].append((now, value))
 
-    def plot_data_thread(self, interval=0.1):
-        plt.ion()  # Interaktiver Modus für dynamische Updates
-        fig, axs = None, None
 
+
+    def plot(self):
         while True:
             with self.lock:
-                data_copy = self.data.copy()  # flache Kopie reicht für Key-Access
+                self.fig.clf()
 
-            if not data_copy:
-                time.sleep(interval)
-                continue
+                for i, axis in enumerate(self.ax):
+                    self.ax[axis] = self.fig.add_subplot(len(self.ax) + 1, 1, i + 1)
+                    self.ax[axis].set_title(f"Group: ")
+                    self.ax[axis].set_xlabel("Time [s]")
+                    self.ax[axis].set_ylabel(f"Unit: ")
 
-            # Subplots anlegen oder aktualisieren
-            if fig is None:
-                fig, axs = plt.subplots(len(data_copy), 1, figsize=(10, 6 * len(data_copy)))
-                if len(data_copy) == 1:
-                    axs = [axs]
-            else:
-                fig.clf()
-                axs = []
-                for i in range(len(data_copy)):
-                    axs.append(fig.add_subplot(len(data_copy), 1, i + 1))
+                for axis in self.ax:
+                    for dataName in self.data[axis]:
+                        times, vals = zip(*self.data[axis][dataName])
+                        self.ax[axis].plot(times, vals)
 
-            for i, (group, units) in enumerate(data_copy.items()):
-                ax = axs[i]
-                ax.set_title(f"Group: {group}")
-                ax.set_xlabel("Time [s]")
-                ax.set_ylabel("Values")
-
-                color_cycle = plt.rcParams['axes.prop_cycle'].by_key()['color']
-                base_ax = ax
-
-                for c, (unit, sensors) in enumerate(units.items()):
-                    if c > 0:
-                        ax2 = base_ax.twinx()
-                        ax2.spines['right'].set_position(('outward', 60 * (c - 1)))
-                    else:
-                        ax2 = base_ax
-
-                    ax2.set_ylabel(f"Unit: {unit}")
-                    for sensor, values in sensors.items():
-                        times, vals = zip(*values)
-                        ax2.plot(times, vals, label=f"{sensor}", color=color_cycle[c % len(color_cycle)])
-
-                base_ax.legend(loc='upper left')
-
-            plt.tight_layout()
-            plt.pause(0.1)
-            time.sleep(interval)
+                plt.tight_layout()
+                self.fig.canvas.draw()
+                self.fig.canvas.flush_events()
+                plt.pause(0.1)
 
     def run(self):
-        reader_thread = threading.Thread(target=self.read_uart, daemon=True)
+        reader_thread = threading.Thread(target=self.read_log_plot_uart, daemon=True)
         reader_thread.start()
-        self.plot_data_thread()
-        # self.plot()
+        self.plot()
 
 
 # Beispiel zur Verwendung:
