@@ -9,3 +9,5 @@ Just run the python script `uartLogPlot.py` or the `/dist/uartLogPlot.exe`
 
 <img width="1398" height="671" alt="image" src="https://github.com/user-attachments/assets/d4a8b578-801c-41de-bbb2-7a805cff9634" />
 
+Um eine Exe aus dem Python File zu erstellen wird folgender Kommandozeilen Befehl verwendet:
+python -m PyInstaller deine_datei.spec
