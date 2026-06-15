@@ -1,4 +1,6 @@
 import re
+import sys
+import sys
 import threading
 import time
 from collections import defaultdict, deque
@@ -8,17 +10,31 @@ import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 import serial
 import math
+import argparse
 
-# === User prompt ===
-print("Welcome to UART Data Logger and Plotter")
-print("\nExpected Format: <group>/<signal>[unit]: <value>")
-print("Example: Temperature/SHT41 Temperature[°C]: 22.36")
-print("\nConfiguration:")
-port = input("Serieller Port (z.B. COM3 oder /dev/ttyUSB0) [COM5]: ").strip() or "COM5"
-baud = int(input("Baudrate (z.B. 115200) [9600]: ").strip() or "9600")
-logfile = input("Logfile Name (z.B. logfile.txt) [uart.log]: ").strip() or "uart.log"
-window_sec = float(input("Anzahl Sekunden im Plotfenster [60]: ").strip() or "60")
+parser = argparse.ArgumentParser()
+parser.add_argument("port", help="Serieller Port (z.B. COM3 oder /dev/ttyUSB0)")
+parser.add_argument("--baud", default=9600, type=int, help="Baudrate")
+parser.add_argument("--logfile", default="uart.log", help="Logfile Name (z.B. logfile.txt)")
+parser.add_argument("--window_sec", default=60, type=float, help="Anzahl Sekunden im Plotfenster")
+args = parser.parse_args()
 
+# Wenn keine Argumente übergeben wurden, starte die interaktive Eingabeaufforderung
+if len(sys.argv) == 1:
+    # === User prompt ===
+    print("Welcome to UART Data Logger and Plotter")
+    print("\nExpected Format: <group>/<signal>[unit]: <value>")
+    print("Example: Temperature/SHT41 Temperature[°C]: 22.36")
+    print("\nConfiguration:")
+    port = input("Serieller Port (z.B. COM3 oder /dev/ttyUSB0) [COM5]: ").strip() or "COM5"
+    baud = int(input("Baudrate (z.B. 115200) [9600]: ").strip() or "9600")
+    logfile = input("Logfile Name (z.B. logfile.txt) [uart.log]: ").strip() or "uart.log"
+    window_sec = float(input("Anzahl Sekunden im Plotfenster [60]: ").strip() or "60")
+else:
+    port = args.port
+    baud = args.baud
+    logfile = args.logfile
+    window_sec = args.window_sec
 
 # === Data structures ===
 # {group: {unit: {signal_name: deque[(timestamp, value)]}}}
